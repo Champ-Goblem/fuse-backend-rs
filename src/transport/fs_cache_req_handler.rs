@@ -13,6 +13,7 @@ pub use virtiofs::FsCacheReqHandler;
 mod virtiofs {
     use std::io;
     use std::os::unix::io::RawFd;
+    use std::os::unix::prelude::AsRawFd;
 
     #[cfg(feature = "vhost-user-fs")]
     use vhost::vhost_user::message::{
@@ -21,9 +22,9 @@ mod virtiofs {
     #[cfg(feature = "vhost-user-fs")]
     use vhost::vhost_user::{SlaveFsCacheReq, VhostUserMasterReqHandler};
 
-    use crate::abi::virtio_fs::RemovemappingOne;
     #[cfg(feature = "vhost-user-fs")]
     use crate::abi::virtio_fs::SetupmappingFlags;
+    use crate::abi::virtio_fs::{IOFlags, RemovemappingOne};
 
     /// Trait to support virtio-fs DAX Window operations.
     ///
@@ -51,6 +52,16 @@ mod virtiofs {
 
         /// Remove those mappings that provide the access to file data.
         fn unmap(&mut self, requests: Vec<RemovemappingOne>) -> io::Result<()>;
+
+        /// Perform IO operations via the vmm
+        fn io(
+            &mut self,
+            foffset: u64,
+            coffset: u64,
+            len: u64,
+            flags: u64,
+            fd: RawFd,
+        ) -> io::Result<()>;
     }
 
     #[cfg(feature = "vhost-user-fs")]
@@ -89,6 +100,29 @@ mod virtiofs {
 
                 self.fs_slave_unmap(&msg)?;
             }
+
+            Ok(())
+        }
+
+        fn io(
+            &mut self,
+            foffset: u64,
+            coffset: u64,
+            len: u64,
+            flags: u64,
+            fd: RawFd,
+        ) -> io::Result<()> {
+            let mut msg: VhostUserFSSlaveMsg = Default::default();
+            msg.fd_offset[0] = foffset;
+            msg.cache_offset[0] = coffset;
+            msg.len[0] = len;
+            msg.flags[0] = if (flags & IOFlags::WRITE.bits()) != 0 {
+                VhostUserFSSlaveMsgFlags::MAP_W
+            } else {
+                VhostUserFSSlaveMsgFlags::MAP_R
+            };
+
+            self.fs_slave_io(&msg, &fd)?;
 
             Ok(())
         }

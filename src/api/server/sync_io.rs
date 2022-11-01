@@ -36,6 +36,7 @@ impl<F: FileSystem + Sync> Server<F> {
         vu_req: Option<&mut dyn FsCacheReqHandler>,
         hook: Option<&dyn MetricsHook>,
     ) -> Result<usize> {
+        debug!("Reader {:?}", r);
         let in_header: InHeader = r.read_obj().map_err(Error::DecodeMessage)?;
         let mut ctx = SrvContext::<F, S>::new(in_header, r, w);
         if ctx.in_header.len > (MAX_BUFFER_SIZE + BUFFER_HEADER_SIZE) {
@@ -65,7 +66,7 @@ impl<F: FileSystem + Sync> Server<F> {
             x if x == Opcode::Link as u32 => self.link(ctx),
             x if x == Opcode::Open as u32 => self.open(ctx),
             x if x == Opcode::Read as u32 => self.read(ctx),
-            x if x == Opcode::Write as u32 => self.write(ctx),
+            x if x == Opcode::Write as u32 => self.write(ctx, vu_req),
             x if x == Opcode::Statfs as u32 => self.statfs(ctx),
             x if x == Opcode::Release as u32 => self.release(ctx),
             x if x == Opcode::Fsync as u32 => self.fsync(ctx),
@@ -382,7 +383,16 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn write<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+    fn write<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, S>,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+    ) -> Result<usize> {
+        if vu_req.is_none() && ctx.r.contains_unmappable() {
+            debug!("Require VhostUser master for dax requests");
+            return ctx.reply_error_explicit(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
         let WriteIn {
             fh,
             offset,
@@ -392,6 +402,11 @@ impl<F: FileSystem + Sync> Server<F> {
             flags,
             ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
+
+        debug!(
+            "WriteIn fh {} offet {} size {} fuse_flags {} lock_owner {} flags {}",
+            fh, offset, size, fuse_flags, lock_owner, flags
+        );
 
         if size > MAX_BUFFER_SIZE {
             return ctx.reply_error_explicit(io::Error::from_raw_os_error(libc::ENOMEM));
@@ -404,6 +419,13 @@ impl<F: FileSystem + Sync> Server<F> {
         };
 
         let delayed_write = fuse_flags & WRITE_CACHE != 0;
+
+        let dax = ctx.r.contains_unmappable();
+        debug!(
+            "reader {:?} unmappables {}",
+            ctx.r,
+            ctx.r.contains_unmappable()
+        );
 
         let mut data_reader = ZcReader(ctx.take_reader());
 
@@ -418,6 +440,8 @@ impl<F: FileSystem + Sync> Server<F> {
             delayed_write,
             flags,
             fuse_flags,
+            vu_req,
+            dax,
         ) {
             Ok(count) => {
                 let out = WriteOut {

@@ -18,6 +18,7 @@ use super::*;
 use crate::abi::fuse_abi::{CreateIn, FOPEN_IN_KILL_SUIDGID, WRITE_KILL_PRIV};
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::abi::virtio_fs;
+use crate::abi::virtio_fs::IOFlags;
 use crate::api::filesystem::{
     Context, DirEntry, Entry, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -682,24 +683,63 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         _delayed_write: bool,
         _flags: u32,
         fuse_flags: u32,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+        dax: bool,
     ) -> io::Result<usize> {
-        let data = self.get_data(handle, inode, libc::O_RDWR)?;
+        if dax && vu_req.is_none() {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Dax request recieved but cant be forwarded over vu_req",
+            ))
+        } else {
+            let data = self.get_data(handle, inode, libc::O_RDWR)?;
 
-        // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
-        // It's safe because the `data` variable's lifetime spans the whole function,
-        // so data.file won't be closed.
-        let f = unsafe { File::from_raw_fd(data.get_handle_raw_fd()) };
-        let mut f = ManuallyDrop::new(f);
+            // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
+            // It's safe because the `data` variable's lifetime spans the whole function,
+            // so data.file won't be closed.
+            let f = unsafe { File::from_raw_fd(data.get_handle_raw_fd()) };
+            let mut f = ManuallyDrop::new(f);
 
-        // Cap restored when _killpriv is dropped
-        let _killpriv =
-            if self.killpriv_v2.load(Ordering::Relaxed) && (fuse_flags & WRITE_KILL_PRIV != 0) {
+            // Cap restored when _killpriv is dropped
+            let _killpriv = if self.killpriv_v2.load(Ordering::Relaxed)
+                && (fuse_flags & WRITE_KILL_PRIV != 0)
+            {
                 self::drop_cap_fsetid()?
             } else {
                 None
             };
 
-        r.read_to(&mut *f, size as usize, offset)
+            let mut read = r.read_to(&mut *f, size as usize, offset)?;
+
+            debug!("passthrough.write dax {}", dax);
+            if read < size as usize && dax {
+                let vu = vu_req.unwrap();
+                let unmappable_buffers = r.read_unmappables();
+
+                let total = unmappable_buffers.into_iter().fold(0, |size: usize, buf| {
+                    let io_res = vu.io(
+                        0,
+                        buf.addr as u64,
+                        buf.size as u64,
+                        IOFlags::WRITE.bits(),
+                        f.as_raw_fd(),
+                    );
+
+                    debug!("Passthrough write dax io res: {:?}", io_res);
+                    if io_res.is_ok() {
+                        return size + buf.size;
+                    }
+                    size
+                });
+
+                read += total;
+            }
+
+            if read < size as usize {
+                warn!("PassthroughFS.write Written {} yet wants {}", read, size);
+            }
+            Ok(read)
+        }
     }
 
     fn getattr(

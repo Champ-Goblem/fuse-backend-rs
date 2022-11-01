@@ -347,6 +347,8 @@ impl FileSystem for Vfs {
         delayed_write: bool,
         flags: u32,
         fuse_flags: u32,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+        dax: bool,
     ) -> Result<usize> {
         match self.get_real_rootfs(inode)? {
             (Left(fs), idata) => fs.write(
@@ -360,6 +362,8 @@ impl FileSystem for Vfs {
                 delayed_write,
                 flags,
                 fuse_flags,
+                vu_req,
+                dax,
             ),
             (Right(fs), idata) => fs.write(
                 ctx,
@@ -372,6 +376,8 @@ impl FileSystem for Vfs {
                 delayed_write,
                 flags,
                 fuse_flags,
+                vu_req,
+                dax,
             ),
         }
     }

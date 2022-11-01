@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use crate::abi::fuse_abi as fuse;
 use crate::file_traits::FileReadWriteVolatile;
+use crate::transport::UnmappedBuffer;
 
 pub use fuse::FsOptions;
 pub use fuse::OpenOptions;
@@ -275,6 +276,9 @@ pub trait ZeroCopyReader: io::Read {
             }
         }
     }
+
+    /// Return the unmappable vectors to be handled
+    fn read_unmappables(&mut self) -> Vec<UnmappedBuffer>;
 }
 
 /// A trait for directly copying data from a `File` into the fuse transport without first storing

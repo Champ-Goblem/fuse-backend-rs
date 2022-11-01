@@ -404,6 +404,8 @@ pub trait FileSystem {
         delayed_write: bool,
         flags: u32,
         fuse_flags: u32,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+        dax: bool,
     ) -> io::Result<usize> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
@@ -1058,6 +1060,8 @@ impl<FS: FileSystem> FileSystem for Arc<FS> {
         delayed_write: bool,
         flags: u32,
         fuse_flags: u32,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+        dax: bool,
     ) -> io::Result<usize> {
         self.deref().write(
             ctx,
@@ -1070,6 +1074,8 @@ impl<FS: FileSystem> FileSystem for Arc<FS> {
             delayed_write,
             flags,
             fuse_flags,
+            vu_req,
+            dax,
         )
     }
 

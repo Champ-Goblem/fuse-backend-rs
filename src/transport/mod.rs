@@ -71,6 +71,9 @@ pub enum Error {
     #[cfg(feature = "virtiofs")]
     /// Invalid Indirect Virtio descriptors.
     ConvertIndirectDescriptor(virtio_queue::Error),
+    #[cfg(feature = "virtiofs")]
+    /// Tried to read from unmappable buffer
+    AccessUnmappableError,
 }
 
 impl fmt::Display for Error {
@@ -96,6 +99,8 @@ impl fmt::Display for Error {
             ConvertIndirectDescriptor(e) => write!(f, "invalid indirect descriptor: {}", e),
             #[cfg(feature = "virtiofs")]
             GuestMemoryError(e) => write!(f, "descriptor guest memory error: {}", e),
+            #[cfg(feature = "virtiofs")]
+            AccessUnmappableError => write!(f, "tried to read data from unmappable buffer"),
         }
     }
 }
@@ -105,8 +110,31 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl std::error::Error for Error {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
+/// A buffer that isnt mapped into daemon space
+pub struct UnmappedBuffer {
+    /// The base address of the buffer
+    pub addr: u64,
+    /// The size of the buffer
+    pub size: usize,
+}
+
+#[derive(Clone, Debug)]
+/// A container for mappable and unmappable buffers
+pub struct IoBuffer<'a, S> {
+    /// Determines if the buffer is mapped or not
+    pub mapped_addr: bool,
+    /// The mapped buffer
+    pub mapped_buffer: Option<VolatileSlice<'a, S>>,
+    /// The unmapped buffer
+    pub unmapped_buffer: Option<UnmappedBuffer>,
+}
+
+#[derive(Clone, Debug)]
 struct IoBuffers<'a, S> {
+    #[cfg(feature = "virtiofs")]
+    buffers: VecDeque<IoBuffer<'a, S>>,
+    #[cfg(not(feature = "virtiofs"))]
     buffers: VecDeque<VolatileSlice<'a, S>>,
     bytes_consumed: usize,
 }
@@ -125,16 +153,23 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
         // This is guaranteed not to overflow because the total length of the chain
         // is checked during all creations of `IoBuffers` (see
         // `Reader::new()` and `Writer::new()`).
-        self.buffers
-            .iter()
-            .fold(0usize, |count, buf| count + buf.len() as usize)
+        self.buffers.iter().fold(0usize, |count, buf| {
+            if buf.mapped_addr && buf.mapped_buffer.is_some() {
+                return count + buf.mapped_buffer.as_ref().unwrap().len();
+            }
+            count
+        })
     }
 
     fn bytes_consumed(&self) -> usize {
         self.bytes_consumed
     }
 
-    fn allocate_file_volatile_slice(&self, count: usize) -> Vec<FileVolatileSlice> {
+    fn allocate_file_volatile_slice(
+        &self,
+        count: usize,
+        fail_on_unmappable: bool,
+    ) -> io::Result<Vec<FileVolatileSlice>> {
         let mut rem = count;
         let mut bufs: Vec<FileVolatileSlice> = Vec::with_capacity(self.buffers.len());
 
@@ -143,21 +178,32 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
                 break;
             }
 
-            // If buffer contains more data than `rem`, truncate buffer to `rem`, otherwise
-            // more data is written out and causes data corruption.
-            let local_buf = if buf.len() > rem {
-                // Safe because we just check rem < buf.len()
-                FileVolatileSlice::from_volatile_slice(&buf.subslice(0, rem).unwrap())
-            } else {
-                FileVolatileSlice::from_volatile_slice(buf)
-            };
-            bufs.push(local_buf);
+            if buf.mapped_addr && buf.mapped_buffer.is_some() {
+                let buffer = buf.mapped_buffer.as_ref().unwrap();
+                // If buffer contains more data than `rem`, truncate buffer to `rem`, otherwise
+                // more data is written out and causes data corruption.
+                let local_buf = if buffer.len() > rem {
+                    // Safe because we just check rem < buf.len()
+                    FileVolatileSlice::from_volatile_slice(&buffer.subslice(0, rem).unwrap())
+                } else {
+                    FileVolatileSlice::from_volatile_slice(buffer)
+                };
+                bufs.push(local_buf);
 
-            // Don't need check_sub() as we just made sure rem >= local_buf.len()
-            rem -= local_buf.len() as usize;
+                // Don't need check_sub() as we just made sure rem >= local_buf.len()
+                rem -= local_buf.len() as usize;
+            } else if fail_on_unmappable {
+                // Exit if we start trying to read data from an unmappable buffer
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    Error::AccessUnmappableError,
+                ));
+            } else {
+                break;
+            }
         }
 
-        bufs
+        Ok(bufs)
     }
 
     #[cfg(feature = "async-io")]
@@ -223,7 +269,7 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
         bufs
     }
 
-    fn mark_dirty(&self, count: usize) {
+    fn mark_dirty(&self, count: usize) -> io::Result<()> {
         let mut rem = count;
 
         for buf in &self.buffers {
@@ -231,19 +277,29 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
                 break;
             }
 
-            // If buffer contains more data than `rem`, truncate buffer to `rem`, otherwise
-            // more data is written out and causes data corruption.
-            let local_buf = if buf.len() > rem {
-                // Safe because we just check rem < buf.len()
-                buf.subslice(0, rem).unwrap()
-            } else {
-                buf.clone()
-            };
-            local_buf.bitmap().mark_dirty(0, local_buf.len());
+            if buf.mapped_addr && buf.mapped_buffer.is_some() {
+                let buffer = buf.mapped_buffer.as_ref().unwrap();
+                // If buffer contains more data than `rem`, truncate buffer to `rem`, otherwise
+                // more data is written out and causes data corruption.
+                let local_buf = if buffer.len() > rem {
+                    // Safe because we just check rem < buf.len()
+                    buffer.subslice(0, rem).unwrap()
+                } else {
+                    buffer.clone()
+                };
+                local_buf.bitmap().mark_dirty(0, local_buf.len());
 
-            // Don't need check_sub() as we just made sure rem >= local_buf.len()
-            rem -= local_buf.len() as usize;
+                // Don't need check_sub() as we just made sure rem >= local_buf.len()
+                rem -= local_buf.len() as usize;
+            } else {
+                // Stop if we start to mark dirty unmappable buffers
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    Error::AccessUnmappableError,
+                ));
+            }
         }
+        Ok(())
     }
 
     fn mark_used(&mut self, bytes_consumed: usize) -> io::Result<()> {
@@ -257,17 +313,32 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
                 })?;
 
         let mut rem = bytes_consumed;
-        while let Some(buf) = self.buffers.pop_front() {
-            if rem < buf.len() {
-                // Split the slice and push the remainder back into the buffer list. Safe because we
-                // know that `rem` is not out of bounds due to the check and we checked the bounds
-                // on `buf` when we added it to the buffer list.
-                self.buffers.push_front(buf.offset(rem).unwrap());
-                break;
-            }
+        while rem > 0 {
+            if let Some(buf) = self.buffers.pop_front() {
+                if buf.mapped_addr && buf.mapped_buffer.is_some() {
+                    let buffer = buf.mapped_buffer.unwrap();
+                    if rem < buffer.len() {
+                        // Split the slice and push the remainder back into the buffer list. Safe because we
+                        // know that `rem` is not out of bounds due to the check and we checked the bounds
+                        // on `buf` when we added it to the buffer list.
+                        self.buffers.push_front(IoBuffer {
+                            mapped_buffer: Some(buffer.offset(rem).unwrap()),
+                            mapped_addr: true,
+                            unmapped_buffer: None,
+                        });
+                        break;
+                    }
 
-            // No need for checked math because we know that `buf.size() <= rem`.
-            rem -= buf.len();
+                    // No need for checked math because we know that `buf.size() <= rem`.
+                    rem -= buffer.len();
+                } else {
+                    // Stop if we start marking passed the unmappable buffers
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        Error::AccessUnmappableError,
+                    ));
+                }
+            }
         }
 
         self.bytes_consumed = total_bytes_consumed;
@@ -288,7 +359,7 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
     where
         F: FnOnce(&[FileVolatileSlice]) -> io::Result<usize>,
     {
-        let bufs = self.allocate_file_volatile_slice(count);
+        let bufs = self.allocate_file_volatile_slice(count, false)?;
         if bufs.is_empty() {
             Ok(0)
         } else {
@@ -308,27 +379,62 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
         self.consume(false, count, f)
     }
 
+    pub fn get_unmappables(&mut self) -> Vec<UnmappedBuffer> {
+        self.buffers
+            .iter()
+            .filter(|buf| !buf.mapped_addr && buf.unmapped_buffer.is_some())
+            .map(|buf| buf.unmapped_buffer.clone().unwrap())
+            .collect()
+    }
+
     fn split_at(&mut self, offset: usize) -> Result<Self> {
         let mut rem = offset;
-        let pos = self.buffers.iter().position(|buf| {
-            if rem < buf.len() {
+        let mut mapped_buffers: VecDeque<IoBuffer<S>> = self
+            .clone()
+            .buffers
+            .into_iter()
+            .filter(|buf| buf.mapped_addr && buf.mapped_buffer.is_some())
+            .collect();
+
+        let pos = mapped_buffers.iter().position(|buf| {
+            if rem < buf.mapped_buffer.as_ref().unwrap().len() {
                 true
             } else {
-                rem -= buf.len();
+                rem -= buf.mapped_buffer.as_ref().unwrap().len();
                 false
             }
         });
 
         if let Some(at) = pos {
-            let mut other = self.buffers.split_off(at);
+            let mut other = mapped_buffers.split_off(at);
 
             if rem > 0 {
                 // There must be at least one element in `other` because we checked
                 // its `size` value in the call to `position` above.
                 let front = other.pop_front().expect("empty VecDeque after split");
-                self.buffers
-                    .push_back(front.subslice(0, rem).map_err(Error::VolatileMemoryError)?);
-                other.push_front(front.offset(rem).map_err(Error::VolatileMemoryError)?);
+                mapped_buffers.push_back(IoBuffer {
+                    mapped_buffer: Some(
+                        front
+                            .mapped_buffer
+                            .as_ref()
+                            .unwrap()
+                            .subslice(0, rem)
+                            .map_err(Error::VolatileMemoryError)?,
+                    ),
+                    mapped_addr: true,
+                    unmapped_buffer: None,
+                });
+                other.push_front(IoBuffer {
+                    mapped_buffer: Some(
+                        front
+                            .mapped_buffer
+                            .unwrap()
+                            .offset(rem)
+                            .map_err(Error::VolatileMemoryError)?,
+                    ),
+                    mapped_addr: true,
+                    unmapped_buffer: None,
+                });
             }
 
             Ok(IoBuffers {
@@ -352,15 +458,17 @@ impl<S: BitmapSlice> IoBuffers<'_, S> {
 /// descriptors after any device-readable descriptors (2.6.4.2 in Virtio Spec v1.1).
 /// Reader will skip iterating over descriptor chain when first writable
 /// descriptor is encountered.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Reader<'a, S = ()> {
     buffers: IoBuffers<'a, S>,
+    dax_request: bool,
 }
 
 impl<S: BitmapSlice> Default for Reader<'_, S> {
     fn default() -> Self {
         Reader {
             buffers: IoBuffers::default(),
+            dax_request: false,
         }
     }
 }
@@ -451,9 +559,20 @@ impl<S: BitmapSlice> Reader<'_, S> {
     /// `Reader` can read up to `available_bytes() - offset` bytes.  Returns an error if
     /// `offset > self.available_bytes()`.
     pub fn split_at(&mut self, offset: usize) -> Result<Self> {
-        self.buffers
-            .split_at(offset)
-            .map(|buffers| Reader { buffers })
+        self.buffers.split_at(offset).map(|buffers| Reader {
+            buffers,
+            dax_request: false,
+        })
+    }
+
+    /// Return true if the vector of buffers contains unmappable ones
+    pub fn contains_unmappable(&self) -> bool {
+        self.dax_request
+    }
+
+    /// Return the unmappable buffers to be handled
+    pub fn read_unmappables(&mut self) -> Vec<UnmappedBuffer> {
+        self.buffers.get_unmappables()
     }
 }
 
@@ -732,7 +851,7 @@ pub fn pagesize() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use crate::transport::IoBuffers;
+    use crate::transport::{IoBuffer, IoBuffers};
     use std::collections::VecDeque;
     use vm_memory::{
         bitmap::{AtomicBitmap, Bitmap},
@@ -745,8 +864,16 @@ mod tests {
         let mut buf2 = vec![0x0u8; 16];
         let mut bufs = VecDeque::new();
         unsafe {
-            bufs.push_back(VolatileSlice::new(buf1.as_mut_ptr(), buf1.len()));
-            bufs.push_back(VolatileSlice::new(buf2.as_mut_ptr(), buf2.len()));
+            bufs.push_back(IoBuffer {
+                mapped_buffer: Some(VolatileSlice::new(buf1.as_mut_ptr(), buf1.len())),
+                mapped_addr: true,
+                unmapped_buffer: None,
+            });
+            bufs.push_back(IoBuffer {
+                mapped_buffer: Some(VolatileSlice::new(buf2.as_mut_ptr(), buf2.len())),
+                mapped_addr: true,
+                unmapped_buffer: None,
+            });
         }
         let mut buffers = IoBuffers {
             buffers: bufs,
@@ -801,16 +928,24 @@ mod tests {
         let mut bufs = VecDeque::new();
 
         unsafe {
-            bufs.push_back(VolatileSlice::with_bitmap(
-                buf1.as_mut_ptr(),
-                buf1.len(),
-                bitmap1.slice_at(0),
-            ));
-            bufs.push_back(VolatileSlice::with_bitmap(
-                buf2.as_mut_ptr(),
-                buf2.len(),
-                bitmap2.slice_at(0),
-            ));
+            bufs.push_back(IoBuffer {
+                mapped_buffer: Some(VolatileSlice::with_bitmap(
+                    buf1.as_mut_ptr(),
+                    buf1.len(),
+                    bitmap1.slice_at(0),
+                )),
+                mapped_addr: true,
+                unmapped_buffer: None,
+            });
+            bufs.push_back(IoBuffer {
+                mapped_buffer: Some(VolatileSlice::with_bitmap(
+                    buf2.as_mut_ptr(),
+                    buf2.len(),
+                    bitmap2.slice_at(0),
+                )),
+                mapped_addr: true,
+                unmapped_buffer: None,
+            });
         }
         let mut buffers = IoBuffers {
             buffers: bufs,
