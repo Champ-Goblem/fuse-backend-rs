@@ -36,7 +36,6 @@ impl<F: FileSystem + Sync> Server<F> {
         vu_req: Option<&mut dyn FsCacheReqHandler>,
         hook: Option<&dyn MetricsHook>,
     ) -> Result<usize> {
-        debug!("Reader {:?}", r);
         let in_header: InHeader = r.read_obj().map_err(Error::DecodeMessage)?;
         let mut ctx = SrvContext::<F, S>::new(in_header, r, w);
         if ctx.in_header.len > (MAX_BUFFER_SIZE + BUFFER_HEADER_SIZE) {
@@ -325,6 +324,10 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn read<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+        if ctx.r.contains_unmappable() {
+            warn!("Read with dax!!");
+        }
+
         let ReadIn {
             fh,
             offset,
@@ -421,11 +424,6 @@ impl<F: FileSystem + Sync> Server<F> {
         let delayed_write = fuse_flags & WRITE_CACHE != 0;
 
         let dax = ctx.r.contains_unmappable();
-        debug!(
-            "reader {:?} unmappables {}",
-            ctx.r,
-            ctx.r.contains_unmappable()
-        );
 
         let mut data_reader = ZcReader(ctx.take_reader());
 
@@ -1162,7 +1160,8 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
             error: 0,
             unique: self.unique(),
         };
-        trace!("fuse: new reply {:?}", header);
+        info!("reply");
+        // trace!("fuse: new reply {:?}", header);
 
         match (data2.len(), data3.len()) {
             (0, 0) => self

@@ -84,6 +84,8 @@ mod virtiofs {
                 VhostUserFSSlaveMsgFlags::MAP_R
             };
 
+            self.set_reply_ack_flag(true);
+
             self.fs_slave_map(&msg, &fd)?;
 
             Ok(())
@@ -97,6 +99,8 @@ mod virtiofs {
                     msg.len[ind] = req.len;
                     msg.cache_offset[ind] = req.moffset;
                 }
+
+                self.set_reply_ack_flag(true);
 
                 self.fs_slave_unmap(&msg)?;
             }
@@ -121,6 +125,8 @@ mod virtiofs {
             } else {
                 VhostUserFSSlaveMsgFlags::MAP_R
             };
+
+            self.set_reply_ack_flag(false);
 
             self.fs_slave_io(&msg, &fd)?;
 

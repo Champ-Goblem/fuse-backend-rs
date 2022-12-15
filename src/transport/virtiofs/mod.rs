@@ -132,7 +132,6 @@ impl<'a> Reader<'a> {
             })
             .collect::<Result<VecDeque<IoBuffer<'a, MS<M::Target>>>>>()?;
 
-        debug!("Dax entry in request: {}", dax_request);
         Ok(Reader {
             buffers: IoBuffers {
                 buffers,
