@@ -250,6 +250,7 @@ impl InodeMap {
         }
     }
 }
+#[derive(Debug)]
 
 struct HandleData {
     inode: Inode,

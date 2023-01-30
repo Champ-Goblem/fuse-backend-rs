@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io;
 use std::mem::{self, size_of, ManuallyDrop, MaybeUninit};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::prelude::FileExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -287,12 +288,15 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
         flags: libc::c_int,
     ) -> io::Result<Arc<HandleData>> {
         let no_open = self.no_open.load(Ordering::Relaxed);
-        if !no_open {
+        let handle_data = if !no_open {
             self.handle_map.get(handle, inode)
         } else {
             let file = self.open_inode(inode, flags as i32)?;
             Ok(Arc::new(HandleData::new(inode, file)))
-        }
+        };
+        info!("fuse: get_data {:?}", handle_data);
+
+        handle_data
     }
 }
 
@@ -623,11 +627,6 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         moffset: u64,
         vu_req: &mut dyn FsCacheReqHandler,
     ) -> io::Result<()> {
-        debug!(
-            "fuse: setupmapping ino {:?} foffset {} len {} flags {} moffset {}",
-            inode, foffset, len, flags, moffset
-        );
-
         let open_flags = if (flags & virtio_fs::SetupmappingFlags::WRITE.bits()) != 0 {
             libc::O_RDWR
         } else {
@@ -635,6 +634,10 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         };
 
         let file = self.open_inode(inode, open_flags as i32)?;
+        debug!(
+            "fuse: setupmapping ino {:?} foffset {} len {} flags {} moffset {} file {:?}",
+            inode, foffset, len, flags, moffset, file
+        );
         (*vu_req).map(foffset, moffset, len, flags, file.as_raw_fd())
     }
 
@@ -646,6 +649,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         requests: Vec<virtio_fs::RemovemappingOne>,
         vu_req: &mut dyn FsCacheReqHandler,
     ) -> io::Result<()> {
+        debug!("fuse: removemapping ino {:?}", _inode);
         (*vu_req).unmap(requests)
     }
 
@@ -660,6 +664,10 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
+        debug!(
+            "fuse: passthrough.read ino {:?} handle {} size {} offset {} flags {}",
+            inode, handle, size, offset, _flags
+        );
         let data = self.get_data(handle, inode, libc::O_RDONLY)?;
 
         // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
@@ -709,16 +717,20 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
                 None
             };
 
-            let mut read = r.read_to(&mut *f, size as usize, offset)?;
+            let mut buf = String::new();
+            r.read_to_string(&mut buf)?;
 
-            debug!("passthrough.write dax {}", dax);
+            let mut read = f.write_at(buf.as_bytes(), offset)?;
+
+            debug!("passthrough.write dax {} ino {} handle {} size {} offset {} flags {} fuse_flags {} buf {:?}", dax, inode, handle, size, offset, _flags, fuse_flags, buf);
+
             if read < size as usize && dax {
                 let vu = vu_req.unwrap();
                 let unmappable_buffers = r.read_unmappables();
 
                 let total = unmappable_buffers.into_iter().fold(0, |size: usize, buf| {
                     let io_res = vu.io(
-                        0,
+                        offset,
                         buf.addr as u64,
                         buf.size as u64,
                         IOFlags::WRITE.bits(),

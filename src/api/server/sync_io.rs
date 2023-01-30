@@ -496,6 +496,8 @@ impl<F: FileSystem + Sync> Server<F> {
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
 
+        info!("fuse: Fsync dax {}", ctx.r.contains_unmappable());
+
         match self
             .fs
             .fsync(ctx.context(), ctx.nodeid(), datasync, fh.into())
@@ -797,6 +799,8 @@ impl<F: FileSystem + Sync> Server<F> {
             fh, fsync_flags, ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
+
+        info!("fuse: fsyncdir dax {}", ctx.r.contains_unmappable());
 
         match self
             .fs
@@ -1160,8 +1164,8 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
             error: 0,
             unique: self.unique(),
         };
-        info!("reply");
-        // trace!("fuse: new reply {:?}", header);
+        // info!("reply");
+        trace!("fuse: new reply {:?}", header);
 
         match (data2.len(), data3.len()) {
             (0, 0) => self
