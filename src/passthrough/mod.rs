@@ -573,7 +573,7 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
             no_opendir: AtomicBool::new(false),
             killpriv_v2: AtomicBool::new(false),
             no_readdir: AtomicBool::new(cfg.no_readdir),
-            perfile_dax: AtomicBool::new(false),
+            perfile_dax: AtomicBool::new(cfg.dax_file_size.is_some()),
             cfg,
 
             phantom: PhantomData,

@@ -717,12 +717,9 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
                 None
             };
 
-            let mut buf = String::new();
-            r.read_to_string(&mut buf)?;
+            let mut read = r.read_to(&mut *f, size as usize, offset)?;
 
-            let mut read = f.write_at(buf.as_bytes(), offset)?;
-
-            debug!("passthrough.write dax {} ino {} handle {} size {} offset {} flags {} fuse_flags {} buf {:?}", dax, inode, handle, size, offset, _flags, fuse_flags, buf);
+            debug!("passthrough.write dax {} ino {} handle {} size {} offset {} flags {} fuse_flags {}", dax, inode, handle, size, offset, _flags, fuse_flags);
 
             if read < size as usize && dax {
                 let vu = vu_req.unwrap();
