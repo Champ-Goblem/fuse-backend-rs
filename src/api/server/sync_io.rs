@@ -42,7 +42,7 @@ impl<F: FileSystem + Sync> Server<F> {
             return ctx.reply_error_explicit(io::Error::from_raw_os_error(libc::ENOMEM));
         }
 
-        trace!(
+        info!(
             "fuse: new req {:?}: {:?}",
             Opcode::from(in_header.opcode),
             in_header
@@ -1148,7 +1148,7 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
             error: 0,
             unique: self.unique(),
         };
-        trace!("fuse: new reply {:?}", header);
+        info!("fuse: new reply {:?}", header);
 
         match (data2.len(), data3.len()) {
             (0, 0) => self
@@ -1189,7 +1189,7 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
         if explicit || err.raw_os_error().is_none() {
             error!("fuse: reply error header {:?}, error {:?}", header, err);
         } else {
-            trace!("fuse: reply error header {:?}, error {:?}", header, err);
+            info!("fuse: reply error header {:?}, error {:?}", header, err);
         }
         self.w
             .write_all(header.as_slice())
