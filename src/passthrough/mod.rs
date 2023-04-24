@@ -931,11 +931,9 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
                             format!("max inode number reached: {VFS_MAX_INO}"),
                         ));
                     }
-                    trace!(
+                    info!(
                         "fuse: do_lookup adds new inode {} ids_altkey {:?} handle_altkey {:?}",
-                        inode,
-                        ids_altkey,
-                        handle_altkey
+                        inode, ids_altkey, handle_altkey
                     );
 
                     InodeMap::insert_locked(
@@ -955,6 +953,12 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
                 }
             }
         };
+
+        info!(
+            "do_lookup returns inode {} attr.ino {}",
+            inode,
+            st.get_stat().st_ino
+        );
 
         Ok(Entry {
             inode,
