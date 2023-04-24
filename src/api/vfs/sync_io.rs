@@ -80,7 +80,7 @@ impl FileSystem for Vfs {
                 let mut entry = fs.lookup(ctx, idata.ino(), name)?;
                 // lookup success, hash it to a real fuse inode
                 entry.attr.st_ino = self.convert_inode(idata.fs_idx(), entry.inode)?;
-
+                entry.inode = self.convert_inode(idata.fs_idx(), entry.inode)?;
                 Ok(entry)
             }
         }
