@@ -18,7 +18,7 @@ use nix::sys::uio::writev;
 use nix::unistd::write;
 use vm_memory::{ByteValued, VolatileMemory, VolatileSlice};
 
-use super::{Error, FileReadWriteVolatile, IoBuffers, Reader, Result, Writer};
+use super::{Error, FileReadWriteVolatile, IoBuffer, IoBuffers, Reader, Result, Writer};
 use crate::file_buf::FileVolatileSlice;
 use crate::BitmapSlice;
 
@@ -50,10 +50,18 @@ impl<'a, S: BitmapSlice + Default> Reader<'a, S> {
     ///
     /// 'request`: Fuse request from clients read from /dev/fuse
     pub fn from_fuse_buffer(buf: FuseBuf<'a>) -> Result<Reader<'a, S>> {
-        let mut buffers: VecDeque<VolatileSlice<'a, S>> = VecDeque::new();
+        let mut buffers: VecDeque<IoBuffer<'a, S>> = VecDeque::new();
         // Safe because Reader has the same lifetime with buf.
-        buffers.push_back(unsafe {
-            VolatileSlice::with_bitmap(buf.mem.as_mut_ptr(), buf.mem.len(), S::default())
+        buffers.push_back(IoBuffer {
+            mapped_buffer: unsafe {
+                Some(VolatileSlice::with_bitmap(
+                    buf.mem.as_mut_ptr(),
+                    buf.mem.len(),
+                    S::default(),
+                ))
+            },
+            mapped_addr: true,
+            unmapped_buffer: None,
         });
 
         Ok(Reader {
@@ -61,6 +69,7 @@ impl<'a, S: BitmapSlice + Default> Reader<'a, S> {
                 buffers,
                 bytes_consumed: 0,
             },
+            dax_request: false,
         })
     }
 }

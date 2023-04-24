@@ -10,6 +10,7 @@ use std::fs::File;
 use std::io;
 use std::mem::{self, size_of, ManuallyDrop, MaybeUninit};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::prelude::FileExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,6 +19,7 @@ use super::*;
 use crate::abi::fuse_abi::{CreateIn, Opcode, FOPEN_IN_KILL_SUIDGID, WRITE_KILL_PRIV};
 #[cfg(any(feature = "vhost-user-fs", feature = "virtiofs"))]
 use crate::abi::virtio_fs;
+use crate::abi::virtio_fs::IOFlags;
 use crate::api::filesystem::{
     Context, DirEntry, Entry, FileSystem, FsOptions, GetxattrReply, ListxattrReply, OpenOptions,
     SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -232,6 +234,8 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
             e
         })?;
 
+        info!("do_getattr returned stat {:?} for inode {}", st, inode);
+
         Ok((st, self.cfg.attr_timeout))
     }
 
@@ -269,12 +273,15 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
         flags: libc::c_int,
     ) -> io::Result<Arc<HandleData>> {
         let no_open = self.no_open.load(Ordering::Relaxed);
-        if !no_open {
+        let handle_data = if !no_open {
             self.handle_map.get(handle, inode)
         } else {
             let file = self.open_inode(inode, flags)?;
             Ok(Arc::new(HandleData::new(inode, file)))
-        }
+        };
+        debug!("fuse: get_data {:?}", handle_data);
+
+        handle_data
     }
 }
 
@@ -586,6 +593,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
             _ => {}
         };
 
+        info!("fuse create {}", entry.inode);
         Ok((entry, ret_handle, opts))
     }
 
@@ -606,10 +614,10 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         moffset: u64,
         vu_req: &mut dyn FsCacheReqHandler,
     ) -> io::Result<()> {
-        debug!(
-            "fuse: setupmapping ino {:?} foffset 0x{:x} len 0x{:x} flags 0x{:x} moffset 0x{:x}",
-            inode, foffset, len, flags, moffset
-        );
+        // debug!(
+        //     "fuse: setupmapping ino {:?} foffset 0x{:x} len 0x{:x} flags 0x{:x} moffset 0x{:x}",
+        //     inode, foffset, len, flags, moffset
+        // );
 
         let open_flags = if (flags & virtio_fs::SetupmappingFlags::WRITE.bits()) != 0 {
             libc::O_RDWR
@@ -617,7 +625,11 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
             libc::O_RDONLY
         };
 
-        let file = self.open_inode(inode, open_flags)?;
+        let file = self.open_inode(inode, open_flags as i32)?;
+        debug!(
+            "fuse: setupmapping ino {:?} foffset {} len {} flags {} moffset {} file {:?}",
+            inode, foffset, len, flags, moffset, file
+        );
         (*vu_req).map(foffset, moffset, len, flags, file.as_raw_fd())
     }
 
@@ -629,6 +641,7 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         requests: Vec<virtio_fs::RemovemappingOne>,
         vu_req: &mut dyn FsCacheReqHandler,
     ) -> io::Result<()> {
+        debug!("fuse: removemapping ino {:?}", _inode);
         (*vu_req).unmap(requests)
     }
 
@@ -643,6 +656,10 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         _lock_owner: Option<u64>,
         _flags: u32,
     ) -> io::Result<usize> {
+        debug!(
+            "fuse: passthrough.read ino {:?} handle {} size {} offset {} flags {}",
+            inode, handle, size, offset, _flags
+        );
         let data = self.get_data(handle, inode, libc::O_RDONLY)?;
 
         // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
@@ -666,30 +683,70 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
         _delayed_write: bool,
         _flags: u32,
         fuse_flags: u32,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+        dax: bool,
     ) -> io::Result<usize> {
-        let data = self.get_data(handle, inode, libc::O_RDWR)?;
+        if dax && vu_req.is_none() {
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Dax request recieved but cant be forwarded over vu_req",
+            ))
+        } else {
+            let data = self.get_data(handle, inode, libc::O_RDWR)?;
 
-        // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
-        // It's safe because the `data` variable's lifetime spans the whole function,
-        // so data.file won't be closed.
-        let f = unsafe { File::from_raw_fd(data.get_handle_raw_fd()) };
+            // Manually implement File::try_clone() by borrowing fd of data.file instead of dup().
+            // It's safe because the `data` variable's lifetime spans the whole function,
+            // so data.file won't be closed.
+            let f = unsafe { File::from_raw_fd(data.get_handle_raw_fd()) };
 
-        if self.seal_size.load(Ordering::Relaxed) {
-            let st = Self::stat_fd(f.as_raw_fd(), None)?;
-            self.seal_size_check(Opcode::Write, st.st_size as u64, offset, size as u64, 0)?;
-        }
+            if self.seal_size.load(Ordering::Relaxed) {
+                let st = Self::stat_fd(f.as_raw_fd(), None)?;
+                self.seal_size_check(Opcode::Write, st.st_size as u64, offset, size as u64, 0)?;
+            }
 
-        let mut f = ManuallyDrop::new(f);
+            let mut f = ManuallyDrop::new(f);
 
-        // Cap restored when _killpriv is dropped
-        let _killpriv =
-            if self.killpriv_v2.load(Ordering::Relaxed) && (fuse_flags & WRITE_KILL_PRIV != 0) {
+            // Cap restored when _killpriv is dropped
+            let _killpriv = if self.killpriv_v2.load(Ordering::Relaxed)
+                && (fuse_flags & WRITE_KILL_PRIV != 0)
+            {
                 self::drop_cap_fsetid()?
             } else {
                 None
             };
 
-        r.read_to(&mut *f, size as usize, offset)
+            let mut read = r.read_to(&mut *f, size as usize, offset)?;
+
+            debug!("passthrough.write dax {} ino {} handle {} size {} offset {} flags {} fuse_flags {}", dax, inode, handle, size, offset, _flags, fuse_flags);
+
+            if read < size as usize && dax {
+                let vu = vu_req.unwrap();
+                let unmappable_buffers = r.read_unmappables();
+
+                let total = unmappable_buffers.into_iter().fold(0, |size: usize, buf| {
+                    let io_res = vu.io(
+                        offset + read as u64 + size as u64,
+                        buf.addr as u64,
+                        buf.size as u64,
+                        IOFlags::WRITE.bits(),
+                        f.as_raw_fd(),
+                    );
+
+                    debug!("Passthrough write dax io res: {:?}", io_res);
+                    if io_res.is_ok() {
+                        return size + buf.size;
+                    }
+                    size
+                });
+
+                read += total;
+            }
+
+            if read < size as usize {
+                warn!("PassthroughFS.write Written {} yet wants {}", read, size);
+            }
+            Ok(read)
+        }
     }
 
     fn getattr(

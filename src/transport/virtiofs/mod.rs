@@ -46,9 +46,9 @@ use std::ptr::copy_nonoverlapping;
 
 use virtio_queue::DescriptorChain;
 use vm_memory::bitmap::{BitmapSlice, MS};
-use vm_memory::{
-    Address, ByteValued, GuestMemory, GuestMemoryRegion, MemoryRegionAddress, VolatileSlice,
-};
+use vm_memory::{Address, ByteValued, GuestMemory, GuestMemoryRegion, MemoryRegionAddress};
+
+use crate::transport::{IoBuffer, UnmappedBuffer};
 
 use super::{Error, FileReadWriteVolatile, FileVolatileSlice, IoBuffers, Reader, Result, Writer};
 
@@ -72,6 +72,7 @@ impl<'a> Reader<'a> {
         M: Deref,
         M::Target: GuestMemory + Sized,
     {
+        let mut dax_request = false;
         let mut total_len: usize = 0;
         let buffers = desc_chain
             .readable()
@@ -83,24 +84,60 @@ impl<'a> Reader<'a> {
                     .checked_add(desc.len() as usize)
                     .ok_or(Error::DescriptorChainOverflow)?;
 
-                let region = mem
-                    .find_region(desc.addr())
-                    .ok_or(Error::FindMemoryRegion)?;
-                let offset = desc
-                    .addr()
-                    .checked_sub(region.start_addr().raw_value())
-                    .unwrap();
-                region
-                    .get_slice(MemoryRegionAddress(offset.raw_value()), desc.len() as usize)
-                    .map_err(Error::GuestMemoryError)
+                // TODO: Handle indirect descriptors
+
+                // info!(
+                //     "fuse: from_descriptor_chain len {} addr {} flags {}",
+                //     desc.len(),
+                //     desc.addr().raw_value(),
+                //     desc.flags()
+                // );
+
+                let opt_region = mem.find_region(desc.addr());
+
+                if let Some(region) = opt_region {
+                    let offset = desc
+                        .addr()
+                        .checked_sub(region.start_addr().raw_value())
+                        .unwrap();
+                    let region_slice = region
+                        .get_slice(MemoryRegionAddress(offset.raw_value()), desc.len() as usize)
+                        .map_err(Error::GuestMemoryError)?;
+
+                    let buffer = IoBuffer {
+                        mapped_addr: true,
+                        mapped_buffer: Some(region_slice),
+                        unmapped_buffer: None,
+                    };
+
+                    Ok(buffer)
+                } else {
+                    info!(
+                        "Dax entry addr {} len {}",
+                        desc.addr().raw_value(),
+                        desc.len()
+                    );
+                    dax_request = true;
+                    // safe because we own it
+                    let buffer = IoBuffer {
+                        mapped_addr: false,
+                        unmapped_buffer: Some(UnmappedBuffer {
+                            addr: desc.addr().raw_value(),
+                            size: desc.len() as usize,
+                        }),
+                        mapped_buffer: None,
+                    };
+                    Ok(buffer)
+                }
             })
-            .collect::<Result<VecDeque<VolatileSlice<'a, MS<M::Target>>>>>()?;
+            .collect::<Result<VecDeque<IoBuffer<'a, MS<M::Target>>>>>()?;
 
         Ok(Reader {
             buffers: IoBuffers {
                 buffers,
                 bytes_consumed: 0,
             },
+            dax_request,
         })
     }
 }
@@ -138,18 +175,36 @@ impl<'a> VirtioFsWriter<'a> {
                     .checked_add(desc.len() as usize)
                     .ok_or(Error::DescriptorChainOverflow)?;
 
-                let region = mem
-                    .find_region(desc.addr())
-                    .ok_or(Error::FindMemoryRegion)?;
-                let offset = desc
-                    .addr()
-                    .checked_sub(region.start_addr().raw_value())
-                    .unwrap();
-                region
-                    .get_slice(MemoryRegionAddress(offset.raw_value()), desc.len() as usize)
-                    .map_err(Error::GuestMemoryError)
+                let opt_region = mem.find_region(desc.addr());
+                if let Some(region) = opt_region {
+                    let offset = desc
+                        .addr()
+                        .checked_sub(region.start_addr().raw_value())
+                        .unwrap();
+                    let region_slice = region
+                        .get_slice(MemoryRegionAddress(offset.raw_value()), desc.len() as usize)
+                        .map_err(Error::GuestMemoryError)?;
+                    let buffer = IoBuffer {
+                        mapped_addr: true,
+                        mapped_buffer: Some(region_slice),
+                        unmapped_buffer: None,
+                    };
+
+                    return Ok(buffer);
+                } else {
+                    // safe because we own it
+                    let buffer = IoBuffer {
+                        mapped_addr: false,
+                        unmapped_buffer: Some(UnmappedBuffer {
+                            addr: desc.addr().raw_value(),
+                            size: desc.len() as usize,
+                        }),
+                        mapped_buffer: None,
+                    };
+                    return Ok(buffer);
+                }
             })
-            .collect::<Result<VecDeque<VolatileSlice<'a, MS<M::Target>>>>>()?;
+            .collect::<Result<VecDeque<IoBuffer<'a, MS<M::Target>>>>>()?;
 
         Ok(VirtioFsWriter {
             buffers: IoBuffers {

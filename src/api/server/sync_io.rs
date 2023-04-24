@@ -65,7 +65,7 @@ impl<F: FileSystem + Sync> Server<F> {
             x if x == Opcode::Link as u32 => self.link(ctx),
             x if x == Opcode::Open as u32 => self.open(ctx),
             x if x == Opcode::Read as u32 => self.read(ctx),
-            x if x == Opcode::Write as u32 => self.write(ctx),
+            x if x == Opcode::Write as u32 => self.write(ctx, vu_req),
             x if x == Opcode::Statfs as u32 => self.statfs(ctx),
             x if x == Opcode::Release as u32 => self.release(ctx),
             x if x == Opcode::Fsync as u32 => self.fsync(ctx),
@@ -324,6 +324,10 @@ impl<F: FileSystem + Sync> Server<F> {
     }
 
     fn read<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+        if ctx.r.contains_unmappable() {
+            warn!("Read with dax!!");
+        }
+
         let ReadIn {
             fh,
             offset,
@@ -382,7 +386,16 @@ impl<F: FileSystem + Sync> Server<F> {
         }
     }
 
-    fn write<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+    fn write<S: BitmapSlice>(
+        &self,
+        mut ctx: SrvContext<'_, F, S>,
+        vu_req: Option<&mut dyn FsCacheReqHandler>,
+    ) -> Result<usize> {
+        if vu_req.is_none() && ctx.r.contains_unmappable() {
+            warn!("Require VhostUser master for dax requests");
+            return ctx.reply_error_explicit(io::Error::from_raw_os_error(libc::EINVAL));
+        }
+
         let WriteIn {
             fh,
             offset,
@@ -392,6 +405,11 @@ impl<F: FileSystem + Sync> Server<F> {
             flags,
             ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
+
+        debug!(
+            "WriteIn fh {} offet {} size {} fuse_flags {} lock_owner {} flags {}",
+            fh, offset, size, fuse_flags, lock_owner, flags
+        );
 
         if size > MAX_BUFFER_SIZE {
             return ctx.reply_error_explicit(io::Error::from_raw_os_error(libc::ENOMEM));
@@ -404,6 +422,8 @@ impl<F: FileSystem + Sync> Server<F> {
         };
 
         let delayed_write = fuse_flags & WRITE_CACHE != 0;
+
+        let dax = ctx.r.contains_unmappable();
 
         let mut data_reader = ZcReader(ctx.take_reader());
 
@@ -418,6 +438,8 @@ impl<F: FileSystem + Sync> Server<F> {
             delayed_write,
             flags,
             fuse_flags,
+            vu_req,
+            dax,
         ) {
             Ok(count) => {
                 let out = WriteOut {
@@ -473,6 +495,8 @@ impl<F: FileSystem + Sync> Server<F> {
             fh, fsync_flags, ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
+
+        debug!("fuse: Fsync dax {}", ctx.r.contains_unmappable());
 
         match self
             .fs
@@ -616,7 +640,7 @@ impl<F: FileSystem + Sync> Server<F> {
         match self.fs.init(capable) {
             Ok(want) => {
                 let enabled = capable & want;
-                info!(
+                debug!(
                     "FUSE INIT major {} minor {}\n in_opts: {:?}\nout_opts: {:?}",
                     major, minor, capable, enabled
                 );
@@ -785,6 +809,8 @@ impl<F: FileSystem + Sync> Server<F> {
             fh, fsync_flags, ..
         } = ctx.r.read_obj().map_err(Error::DecodeMessage)?;
         let datasync = fsync_flags & 0x1 != 0;
+
+        info!("fuse: fsyncdir dax {}", ctx.r.contains_unmappable());
 
         match self
             .fs
@@ -1148,7 +1174,7 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
             error: 0,
             unique: self.unique(),
         };
-        info!("fuse: new reply {:?}", header);
+        debug!("fuse: new reply {:?}", header);
 
         match (data2.len(), data3.len()) {
             (0, 0) => self
@@ -1189,7 +1215,7 @@ impl<'a, F: FileSystem, S: BitmapSlice> SrvContext<'a, F, S> {
         if explicit || err.raw_os_error().is_none() {
             error!("fuse: reply error header {:?}, error {:?}", header, err);
         } else {
-            info!("fuse: reply error header {:?}, error {:?}", header, err);
+            debug!("fuse: reply error header {:?}, error {:?}", header, err);
         }
         self.w
             .write_all(header.as_slice())

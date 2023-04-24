@@ -17,6 +17,11 @@ bitflags! {
         /// Mapping with read permission
         const READ = 0x2;
     }
+
+    pub struct IOFlags: u64 {
+        const READ = 0x1;
+        const WRITE = 0x2;
+    }
 }
 
 /// Setup file mapping request message for virtio-fs.

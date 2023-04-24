@@ -27,7 +27,7 @@ use arc_swap::ArcSwap;
 use crate::abi::fuse_abi::*;
 use crate::api::filesystem::{Context, FileSystem, ZeroCopyReader, ZeroCopyWriter};
 use crate::file_traits::FileReadWriteVolatile;
-use crate::transport::{Reader, Writer};
+use crate::transport::{Reader, UnmappedBuffer, Writer};
 use crate::{bytes_to_cstr, BitmapSlice, Error, Result};
 
 #[cfg(feature = "async-io")]
@@ -76,6 +76,10 @@ impl<'a, S: BitmapSlice> ZeroCopyReader for ZcReader<'a, S> {
         off: u64,
     ) -> io::Result<usize> {
         self.0.read_to_at(f, count, off)
+    }
+
+    fn read_unmappables(&mut self) -> Vec<UnmappedBuffer> {
+        self.0.read_unmappables()
     }
 }
 

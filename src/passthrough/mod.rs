@@ -244,6 +244,7 @@ impl InodeMap {
         ids_altkey: InodeAltKey,
         handle_altkey: Option<InodeAltKey>,
     ) {
+        info!("Insert new inode {}", inode);
         inodes.insert(inode, Arc::new(data));
         inodes.insert_alt(ids_altkey, inode);
         if let Some(altkey) = handle_altkey {
@@ -251,6 +252,7 @@ impl InodeMap {
         }
     }
 }
+#[derive(Debug)]
 
 struct HandleData {
     inode: Inode,
@@ -583,7 +585,7 @@ impl<S: BitmapSlice + Send + Sync> PassthroughFs<S> {
             killpriv_v2: AtomicBool::new(false),
             no_readdir: AtomicBool::new(cfg.no_readdir),
             seal_size: AtomicBool::new(cfg.seal_size),
-            perfile_dax: AtomicBool::new(false),
+            perfile_dax: AtomicBool::new(cfg.dax_file_size.is_some()),
             cfg,
 
             phantom: PhantomData,
