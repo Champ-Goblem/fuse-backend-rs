@@ -169,6 +169,7 @@ impl<F: FileSystem + Sync> Server<F> {
             x if x == Opcode::SetupMapping as u32 => self.setupmapping(ctx, vu_req),
             #[cfg(feature = "virtiofs")]
             x if x == Opcode::RemoveMapping as u32 => self.removemapping(ctx, vu_req),
+            x if x == Opcode::Syncfs as u32 => self.syncfs(ctx),
             // Group reqeusts don't need reply together
             x => match x {
                 x if x == Opcode::Interrupt as u32 => {
@@ -1174,6 +1175,13 @@ impl<F: FileSystem + Sync> Server<F> {
 
                 ctx.reply_ok(Some(out), None)
             }
+            Err(e) => ctx.reply_error(e),
+        }
+    }
+
+    pub(super) fn syncfs<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+        match self.fs.syncfs(ctx.context(), ctx.nodeid()) {
+            Ok(()) => ctx.reply_ok(None::<u8>, None),
             Err(e) => ctx.reply_error(e),
         }
     }

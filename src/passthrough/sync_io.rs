@@ -9,6 +9,7 @@ use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
 use std::mem::{self, size_of, ManuallyDrop, MaybeUninit};
+use std::os::linux::raw;
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1342,6 +1343,17 @@ impl<S: BitmapSlice + Send + Sync> FileSystem for PassthroughFs<S> {
             Err(io::Error::last_os_error())
         } else {
             Ok(res as u64)
+        }
+    }
+
+    fn syncfs(&self, _ctx: &Context, inode: Inode) -> io::Result<()> {
+        let file = self.open_inode(inode, libc::O_RDONLY | libc::O_NOFOLLOW)?;
+        let raw_fd = file.as_raw_fd();
+        let ret = unsafe { libc::syncfs(raw_fd) };
+        if ret != 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
         }
     }
 }

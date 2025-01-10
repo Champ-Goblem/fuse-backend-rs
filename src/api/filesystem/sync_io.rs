@@ -893,6 +893,11 @@ pub trait FileSystem {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
     }
 
+    /// Trigger a syncfs on a fd
+    fn syncfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
+
     /// TODO: support this
     fn notify_reply(&self) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOSYS))
@@ -1341,6 +1346,10 @@ impl<FS: FileSystem> FileSystem for Arc<FS> {
     ) -> io::Result<u32> {
         self.deref()
             .poll(ctx, inode, handle, khandle, flags, events)
+    }
+
+    fn syncfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<()> {
+        self.deref().syncfs(ctx, inode)
     }
 
     /// Send notify reply.

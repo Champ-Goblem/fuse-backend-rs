@@ -24,6 +24,8 @@ use crate::file_traits::{AsyncFileReadWriteVolatile, FileReadWriteVolatile};
 use crate::transport::{FsCacheReqHandler, Reader, Writer};
 use crate::{bytes_to_cstr, encode_io_error_kind, BitmapSlice, Error, Result};
 
+use super::SyncfsIn;
+
 struct AsyncZcReader<'a, S: BitmapSlice = ()>(Reader<'a, S>);
 
 // The underlying VolatileSlice contains "*mut u8", which is just a pointer to a u8 array.
@@ -195,6 +197,7 @@ impl<F: AsyncFileSystem + Sync> Server<F> {
             x if x == Opcode::SetupMapping as u32 => self.setupmapping(ctx, vu_req),
             #[cfg(feature = "virtiofs")]
             x if x == Opcode::RemoveMapping as u32 => self.removemapping(ctx, vu_req),
+            x if x == Opcode::Syncfs as u32 => self.async_syncfs(ctx).await,
             // Group reqeusts don't need reply together
             x => match x {
                 x if x == Opcode::Interrupt as u32 => {
@@ -520,6 +523,11 @@ impl<F: AsyncFileSystem + Sync> Server<F> {
             Ok(()) => ctx.async_reply_ok(None::<u8>, None).await,
             Err(e) => ctx.async_reply_error(e).await,
         }
+    }
+
+    async fn async_syncfs<S: BitmapSlice>(&self, mut ctx: SrvContext<'_, F, S>) -> Result<usize> {
+        ctx.async_reply_error(io::Error::from_raw_os_error(libc::ENOSYS))
+            .await
     }
 }
 

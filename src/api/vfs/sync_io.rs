@@ -697,4 +697,11 @@ impl FileSystem for Vfs {
             (Right(fs), idata) => fs.removemapping(ctx, idata.ino(), requests, req),
         }
     }
+
+    fn syncfs(&self, ctx: &Context, inode: Self::Inode) -> io::Result<()> {
+        match self.get_real_rootfs(inode)? {
+            (Left(fs), idata) => fs.syncfs(ctx, idata.ino()),
+            (Right(fs), idata) => fs.syncfs(ctx, idata.ino()),
+        }
+    }
 }

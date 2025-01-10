@@ -736,7 +736,8 @@ pub enum Opcode {
     CopyFileRange = 47,
     SetupMapping = 48,
     RemoveMapping = 49,
-    MaxOpcode = 50,
+    Syncfs = 50,
+    MaxOpcode = 51,
 
     /* Reserved opcodes: helpful to detect structure endian-ness in case of e.g. virtiofs */
     CuseInitBswapReserved = 1_048_576, /* CUSE_INIT << 8 */
@@ -1319,6 +1320,14 @@ pub struct CopyFileRangeIn {
     pub flags: u64,
 }
 unsafe impl ByteValued for CopyFileRangeIn {}
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct SyncfsIn {
+    pub padding: u64,
+}
+
+unsafe impl ByteValued for SyncfsIn {}
 
 #[cfg(test)]
 mod tests {
